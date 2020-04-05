@@ -12,156 +12,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-type JOBOBJECT_ASSOCIATE_COMPLETION_PORT struct {
-	CompletionKey  uintptr
-	CompletionPort windows.Handle
-}
-
-const (
-	// https://docs.microsoft.com/en-us/windows/win32/secauthz/well-known-sids
-	SECURITY_MANDATORY_LOW_RID = windows.WELL_KNOWN_SID_TYPE(0x00001000)
-)
-
-// https://docs.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken
-// CreateRestrictedToken
-
-var (
-	modadvapi32 = windows.NewLazySystemDLL("advapi32.dll")
-	user32      = windows.NewLazySystemDLL("user32.dll")
-
-	procCreateRestrictedToken = modadvapi32.NewProc("CreateRestrictedToken")
-	procGetThreadDesktop      = user32.NewProc("GetThreadDesktop")
-	procCreateDesktopW        = user32.NewProc("CreateDesktopW")
-)
-
-// BOOL CreateRestrictedToken(
-// 	HANDLE               ExistingTokenHandle,
-// 	DWORD                Flags,
-// 	DWORD                DisableSidCount,
-// 	PSID_AND_ATTRIBUTES  SidsToDisable,
-// 	DWORD                DeletePrivilegeCount,
-// 	PLUID_AND_ATTRIBUTES PrivilegesToDelete,
-// 	DWORD                RestrictedSidCount,
-// 	PSID_AND_ATTRIBUTES  SidsToRestrict,
-// 	PHANDLE              NewTokenHandle
-// );
-
-func createRestrictedToken(
-	ExistingTokenHandle windows.Token,
-	Flags uint32,
-	DisableSidCount uint32,
-	SidsToDisable *windows.SIDAndAttributes,
-	DeletePrivilegeCount uint32,
-	PrivilegesToDelete *windows.SIDAndAttributes,
-	RestrictedSidCount uint32,
-	SidsToRestrict *windows.SIDAndAttributes,
-	NewTokenHandle *windows.Token,
-) (err error) {
-	r1, _, e1 := syscall.Syscall9(
-		procCreateRestrictedToken.Addr(), 9,
-		uintptr(ExistingTokenHandle), uintptr(Flags),
-		uintptr(DisableSidCount),
-		uintptr(unsafe.Pointer(SidsToDisable)),
-		uintptr(DeletePrivilegeCount),
-		uintptr(unsafe.Pointer(PrivilegesToDelete)),
-		uintptr(RestrictedSidCount),
-		uintptr(unsafe.Pointer(SidsToRestrict)),
-		uintptr(unsafe.Pointer(NewTokenHandle)))
-	if r1 == 0 {
-		if e1 != 0 {
-			err = syscall.Errno(e1)
-		} else {
-			err = syscall.EINVAL
-		}
-	}
-	return
-}
-
-// CreateRestrictedToken Flags
-const (
-	DISABLE_MAX_PRIVILEGE = 1 << iota
-	SANDBOX_INERT
-	LUA_TOKEN
-	WRITE_RESTRICTED
-)
-
-// HDESK GetThreadDesktop(
-// 	DWORD dwThreadId
-// );
-
-type HDESK windows.Handle
-
-func getThreadDesktop(threadID uint32) (h HDESK) {
-	r1, _, _ := syscall.Syscall(procGetThreadDesktop.Addr(), 1, uintptr(threadID), 0, 0)
-	h = HDESK(r1)
-	return
-}
-
-// HDESK CreateDesktopW(
-// 	LPCWSTR               lpszDesktop,
-// 	LPCWSTR               lpszDevice,
-// 	DEVMODEW              *pDevmode,
-// 	DWORD                 dwFlags,
-// 	ACCESS_MASK           dwDesiredAccess,
-// 	LPSECURITY_ATTRIBUTES lpsa
-//   );
-
-func createDesktop(desktop, device *uint16,
-	devMode uintptr, flags uint32,
-	desiredAccess windows.ACCESS_MASK,
-	security *windows.SecurityAttributes) (h HDESK, err error) {
-	r1, _, e1 := syscall.Syscall6(procCreateDesktopW.Addr(), 6,
-		uintptr(unsafe.Pointer(desktop)),
-		uintptr(unsafe.Pointer(device)),
-		uintptr(devMode),
-		uintptr(flags), uintptr(desiredAccess),
-		uintptr(unsafe.Pointer(security)))
-	if e1 != 0 {
-		err = syscall.Errno(e1)
-	}
-	h = HDESK(r1)
-	return
-}
-
-const (
-	DESKTOP_READOBJECTS windows.ACCESS_MASK = 1 << iota
-	DESKTOP_CREATEWINDOW
-	DESKTOP_CREATEMENU
-	DESKTOP_HOOKCONTROL
-	DESKTOP_JOURNALRECORD
-	DESKTOP_JOURNALPLAYBACK
-	DESKTOP_ENUMERATE
-	DESKTOP_WRITEOBJECTS
-	DESKTOP_SWITCHDESKTOP // 0x0100L
-)
-
-const (
-	DELETE windows.ACCESS_MASK = 1 << (iota + 16)
-	READ_CONTROL
-	WRITE_DAC
-	WRITE_OWNER
-	SYNCHRONIZE
-)
-
-// https://docs.microsoft.com/en-ca/windows/win32/winstation/desktop-security-and-access-rights
-// https://docs.microsoft.com/en-us/windows/win32/secauthz/standard-access-rights
-const (
-	GENERIC_READ  = DESKTOP_ENUMERATE | DESKTOP_READOBJECTS | READ_CONTROL
-	GENERIC_WRITE = DESKTOP_CREATEMENU | DESKTOP_CREATEWINDOW |
-		DESKTOP_HOOKCONTROL | DESKTOP_JOURNALPLAYBACK | DESKTOP_JOURNALRECORD |
-		DESKTOP_WRITEOBJECTS | READ_CONTROL
-	GENERIC_EXECUTE = DESKTOP_SWITCHDESKTOP | READ_CONTROL
-	GENERIC_ALL     = DESKTOP_CREATEMENU | DESKTOP_CREATEWINDOW |
-		DESKTOP_ENUMERATE | DESKTOP_HOOKCONTROL | DESKTOP_JOURNALPLAYBACK |
-		DESKTOP_JOURNALRECORD | DESKTOP_READOBJECTS | DESKTOP_SWITCHDESKTOP |
-		DESKTOP_WRITEOBJECTS | READ_CONTROL | WRITE_DAC | WRITE_OWNER
-)
-
 func main() {
-	// Get policy user
-	sid, err := windows.CreateWellKnownSid(SECURITY_MANDATORY_LOW_RID)
-	fmt.Println("sid", sid, err)
-
 	// Get group sid
 	curProc, err := windows.GetCurrentProcess()
 	fmt.Println("curProc", curProc, err)
@@ -171,6 +22,7 @@ func main() {
 	err = windows.OpenProcessToken(curProc,
 		windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE|
 			windows.TOKEN_ADJUST_DEFAULT|windows.TOKEN_ASSIGN_PRIMARY, &token)
+	// err = windows.OpenProcessToken(curProc, windows.MAXIMUM_ALLOWED, &token)
 	fmt.Println(token, err)
 
 	// Get group Sid
@@ -194,15 +46,43 @@ func main() {
 	fmt.Println("sids", builtInSid, worldSid, err)
 
 	var attrs []windows.SIDAndAttributes
-	for _, s := range []*windows.SID{groupSid, builtInSid, worldSid} {
+	for _, s := range []*windows.SID{worldSid} {
 		attrs = append(attrs, windows.SIDAndAttributes{Sid: s})
 	}
+	_ = attrs
 
 	// create restricted token
 	var newToken windows.Token
-	err = createRestrictedToken(token, DISABLE_MAX_PRIVILEGE, 0, nil, 0, nil,
-		uint32(len(attrs)), &attrs[0], &newToken)
+	err = createRestrictedToken(token, DISABLE_MAX_PRIVILEGE,
+		0, nil,
+		0, nil,
+		uint32(len(attrs)), &attrs[0],
+		&newToken)
 	fmt.Println("restricted token", newToken, err)
+
+	// low privillege token
+	var lowToken windows.Token
+	err = windows.DuplicateTokenEx(token, windows.MAXIMUM_ALLOWED, nil,
+		windows.SecurityAnonymous,
+		windows.TokenPrimary, &lowToken)
+	fmt.Println("duplicated token", lowToken, err)
+
+	// https://support.microsoft.com/en-ca/help/243330/well-known-security-identifiers-in-windows-operating-systems
+	lowSidName := "S-1-16-4096" // Low Mandatory Level
+	lowSid, err := windows.StringToSid(lowSidName)
+	fmt.Println("low sid", lowSid, err)
+
+	tml := windows.Tokenmandatorylabel{
+		Label: windows.SIDAndAttributes{
+			Sid:        lowSid,
+			Attributes: windows.SE_GROUP_INTEGRITY,
+		},
+	}
+	_ = tml
+
+	err = windows.SetTokenInformation(lowToken, syscall.TokenIntegrityLevel,
+		(*byte)(unsafe.Pointer(&tml)), uint32(unsafe.Sizeof(tml))+windows.GetLengthSid(lowSid))
+	fmt.Println("low token", lowToken, err)
 
 	// get current desktop
 	curDesk := getThreadDesktop(windows.GetCurrentThreadId())
@@ -216,32 +96,31 @@ func main() {
 	deskAccess := DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW |
 		DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP |
 		READ_CONTROL | WRITE_DAC | WRITE_OWNER
-	newDesk, err := createDesktop(nameW, nil, 0, 0, deskAccess, nil)
+	_ = deskAccess
+
+	// newDesk, err := createDesktop(nameW, nil, 0, 0, deskAccess, nil)
+	// allow low integrity to medium / high integrity pipe
+	deskSd, err := windows.SecurityDescriptorFromString("S:(ML;;NW;;;LW)D:(A;;0x12019f;;;WD)")
+	fmt.Println("deskSa", deskSd, err)
+
+	deskSa := windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: deskSd,
+		InheritHandle:      0,
+	}
+
+	newDesk, err := createDesktop(nameW, nil, 0, 0, GENERIC_ALL, &deskSa)
 	fmt.Println("new desktop", newDesk, err)
 
-	// grant access
-	sd, err := windows.GetSecurityInfo(windows.Handle(newDesk), windows.SE_WINDOW_OBJECT,
-		windows.DACL_SECURITY_INFORMATION)
-	fmt.Println(sd, err)
+	if false {
+		// grant access
+		grantAccess(windows.Handle(newDesk), groupSid)
 
-	// explicit access
-	expAccess := windows.EXPLICIT_ACCESS{
-		AccessPermissions: GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE,
-		AccessMode:        windows.GRANT_ACCESS,
-		Trustee: windows.TRUSTEE{
-			MultipleTrusteeOperation: windows.NO_MULTIPLE_TRUSTEE,
-			TrusteeForm:              windows.TRUSTEE_IS_SID,
-			TrusteeType:              windows.TRUSTEE_IS_GROUP,
-			TrusteeValue:             windows.TrusteeValueFromSID(groupSid),
-		},
+		// win station
+		winStation := getProcessWindowStation()
+		fmt.Println("win station", winStation)
+		grantAccess(windows.Handle(winStation), groupSid)
 	}
-	oldACL, _, err := sd.DACL()
-	newACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{expAccess}, oldACL)
-	fmt.Println("new ACL", oldACL, newACL, err)
-
-	// set security info
-	windows.SetSecurityInfo(windows.Handle(newDesk), windows.SE_WINDOW_OBJECT,
-		windows.DACL_SECURITY_INFORMATION, nil, nil, newACL, nil)
 
 	// create job object
 	hJob, err := windows.CreateJobObject(nil, nil)
@@ -313,23 +192,35 @@ func main() {
 	startupInfo.StdOutput = p[1]
 	startupInfo.StdErr = p[1]
 
+	startupInfo.Desktop = nameW
+
 	// process info
 	var processInfo windows.ProcessInformation
 
-	argv := syscall.StringToUTF16Ptr("C:\\go\\bin\\go.exe")
+	// argv := syscall.StringToUTF16Ptr("C:\\go\\bin\\go.exe")
 	// argv := syscall.StringToUTF16Ptr("c:\\windows\\system32\\calc.exe")
 	// argv := syscall.StringToUTF16Ptr("c:\\windows\\system32\\cmd.exe")
 	//argv := syscall.StringToUTF16Ptr("c:\\windows\\py.exe -c \"while True: pass\"")
 	// argv := syscall.StringToUTF16Ptr("c:\\windows\\system32\\tasklist.exe")
-	// argv := syscall.StringToUTF16Ptr("C:\\Program Files\\Git\\usr\\bin\\cat.exe main.go")
+	argv := syscall.StringToUTF16Ptr("C:\\Program Files\\Git\\usr\\bin\\cat.exe go.mod")
 
 	// Create process
 	syscall.ForkLock.Lock()
-	err = windows.CreateProcess(nil, argv, nil, nil, true,
+
+	// err = windows.CreateProcess(nil, argv, nil, nil, true,
+	// 	windows.CREATE_NEW_PROCESS_GROUP|windows.CREATE_NEW_CONSOLE|windows.CREATE_SUSPENDED,
+	// 	nil, nil, &startupInfo, &processInfo)
+
+	// err = CreateProcessAsUser(windows.Handle(newToken), nil, argv, nil, nil, true,
+	// 	windows.CREATE_NEW_PROCESS_GROUP|windows.CREATE_NEW_CONSOLE|windows.CREATE_SUSPENDED,
+	// 	nil, nil, &startupInfo, &processInfo)
+
+	err = CreateProcessAsUser(windows.Handle(lowToken), nil, argv, nil, nil, true,
 		windows.CREATE_NEW_PROCESS_GROUP|windows.CREATE_NEW_CONSOLE|windows.CREATE_SUSPENDED,
 		nil, nil, &startupInfo, &processInfo)
+
 	syscall.ForkLock.Unlock()
-	fmt.Println(err, processInfo)
+	fmt.Println("create process as user", err, processInfo)
 
 	// Close used pipes
 	windows.CloseHandle(p[1])
@@ -338,6 +229,8 @@ func main() {
 	// assign process to job object
 	err = windows.AssignProcessToJobObject(hJob, windows.Handle(processInfo.Process))
 	fmt.Println(err)
+
+	// Disable hard error?
 
 	// resume thread
 	ret2, err := windows.ResumeThread(processInfo.Thread)
@@ -394,6 +287,42 @@ func main() {
 	fmt.Println(exitCode, err)
 
 	<-done
+}
+
+func grantAccess(h windows.Handle, groupSid *windows.SID) {
+	sd, err := windows.GetSecurityInfo(h, windows.SE_WINDOW_OBJECT,
+		windows.DACL_SECURITY_INFORMATION)
+	fmt.Println(sd, err)
+
+	// explicit access
+	expAccess := windows.EXPLICIT_ACCESS{
+		AccessPermissions: GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE,
+		AccessMode:        windows.GRANT_ACCESS,
+		Trustee: windows.TRUSTEE{
+			MultipleTrusteeOperation: windows.NO_MULTIPLE_TRUSTEE,
+			TrusteeForm:              windows.TRUSTEE_IS_SID,
+			TrusteeType:              windows.TRUSTEE_IS_GROUP,
+			TrusteeValue:             windows.TrusteeValueFromSID(groupSid),
+		},
+	}
+	oldACL, _, err := sd.DACL()
+	newACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{expAccess}, oldACL)
+	fmt.Println("new ACL", oldACL, newACL, err)
+
+	// set security info
+	windows.SetSecurityInfo(h, windows.SE_WINDOW_OBJECT,
+		windows.DACL_SECURITY_INFORMATION, nil, nil, newACL, nil)
+
+	// Get sid
+	var nSid *windows.SID
+	err = windows.AllocateAndInitializeSid(
+		&windows.SECURITY_MANDATORY_LABEL_AUTHORITY,
+		1, SECURITY_MANDATORY_LOW_RID, 0, 0, 0, 0, 0, 0, 0, &nSid,
+	)
+	fmt.Println(nSid, err)
+
+	// SYSTEM_MANDATORY_LABEL_ACE
+	/////////////////////////////// leave for now logon.cc: 119 - 147
 }
 
 func randomGen() {

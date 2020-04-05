@@ -8,9 +8,10 @@ Test code that might used in [go-judge](https://github.com/criyle/go-judge)/exec
 - [x] Create IOCP Message Queue
 - [x] Create Pipe for Stdin, Stdout, Stderr
 - [x] Create Process (As User)
-- [ ] Create Desktop
+- [x] Create Desktop
 - [x] Wait On Exit Message
-- [ ] Get Running Result From [JOBOBJECT_EXTENDED_LIMIT_INFORMATION ](https://docs.microsoft.com/en-ca/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information)
+- [ ] Create restricted user environment
+- [ ] Get Running Result From [JOBOBJECT_EXTENDED_LIMIT_INFORMATION](https://docs.microsoft.com/en-ca/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information)
 
 ## Security
 
