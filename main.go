@@ -53,7 +53,7 @@ func main() {
 
 	// create restricted token
 	var newToken windows.Token
-	err = createRestrictedToken(token, DISABLE_MAX_PRIVILEGE,
+	err = CreateRestrictedToken(token, DISABLE_MAX_PRIVILEGE,
 		0, nil,
 		0, nil,
 		uint32(len(attrs)), &attrs[0],
@@ -84,8 +84,20 @@ func main() {
 		(*byte)(unsafe.Pointer(&tml)), uint32(unsafe.Sizeof(tml))+windows.GetLengthSid(lowSid))
 	fmt.Println("low token", lowToken, err)
 
+	err = windows.AdjustTokenPrivileges(lowToken, true, nil, 0, nil, nil)
+	fmt.Println(err)
+
+	fmt.Println(lowToken.Environ(true))
+	tg, err := lowToken.GetTokenGroups()
+	fmt.Println(tg.AllGroups())
+	fmt.Println(lowToken.GetTokenPrimaryGroup())
+	fmt.Println(lowToken.GetTokenUser())
+	fmt.Println(lowToken.GetUserProfileDirectory())
+	fmt.Println(lowToken.IsElevated())
+	fmt.Println(newToken.IsElevated())
+
 	// get current desktop
-	curDesk := getThreadDesktop(windows.GetCurrentThreadId())
+	curDesk := GetThreadDesktop(windows.GetCurrentThreadId())
 	fmt.Println("curDesktop:", curDesk)
 
 	// create desktop
@@ -109,7 +121,7 @@ func main() {
 		InheritHandle:      0,
 	}
 
-	newDesk, err := createDesktop(nameW, nil, 0, 0, GENERIC_ALL, &deskSa)
+	newDesk, err := CreateDesktop(nameW, nil, 0, 0, GENERIC_ALL, &deskSa)
 	fmt.Println("new desktop", newDesk, err)
 
 	if false {
@@ -117,7 +129,7 @@ func main() {
 		grantAccess(windows.Handle(newDesk), groupSid)
 
 		// win station
-		winStation := getProcessWindowStation()
+		winStation := GetProcessWindowStation()
 		fmt.Println("win station", winStation)
 		grantAccess(windows.Handle(winStation), groupSid)
 	}
@@ -185,24 +197,30 @@ func main() {
 	err = windows.SetHandleInformation(p2[0], windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT)
 	fmt.Println(err)
 
+	// create input mapping file
+	fin, err := createFileMapping([]byte("Test Content"), "input")
+	fmt.Println("file mapping", fin, err)
+
 	// create pipe mapping
-	var startupInfo windows.StartupInfo
+	var startupInfo syscall.StartupInfo
 	startupInfo.Flags |= windows.STARTF_USESTDHANDLES // STARTF_FORCEOFFFEEDBACK
-	startupInfo.StdInput = p2[0]
-	startupInfo.StdOutput = p[1]
-	startupInfo.StdErr = p[1]
+	var inHandle windows.Handle
+
+	err = windows.DuplicateHandle(windows.CurrentProcess(), windows.Handle(fin.Fd()), windows.CurrentProcess(), &inHandle, 0, true, syscall.DUPLICATE_SAME_ACCESS)
+	//startupInfo.StdInput = p2[0]
+	startupInfo.StdInput = syscall.Handle(inHandle)
+	startupInfo.StdOutput = syscall.Handle(p[1])
+	startupInfo.StdErr = syscall.Handle(p[1])
 
 	startupInfo.Desktop = nameW
 
-	// process info
-	var processInfo windows.ProcessInformation
-
 	// argv := syscall.StringToUTF16Ptr("C:\\go\\bin\\go.exe")
-	// argv := syscall.StringToUTF16Ptr("c:\\windows\\system32\\calc.exe")
+	//argv := syscall.StringToUTF16Ptr("c:\\windows\\system32\\calc.exe")
 	// argv := syscall.StringToUTF16Ptr("c:\\windows\\system32\\cmd.exe")
 	//argv := syscall.StringToUTF16Ptr("c:\\windows\\py.exe -c \"while True: pass\"")
-	// argv := syscall.StringToUTF16Ptr("c:\\windows\\system32\\tasklist.exe")
-	argv := syscall.StringToUTF16Ptr("C:\\Program Files\\Git\\usr\\bin\\cat.exe go.mod")
+	//argv := syscall.StringToUTF16Ptr("c:\\windows\\system32\\tasklist.exe")
+	//argv := syscall.StringToUTF16Ptr("C:\\Program Files\\Git\\usr\\bin\\cat.exe go.mod")
+	argv := syscall.StringToUTF16Ptr("C:\\Program Files\\Git\\usr\\bin\\cat.exe")
 
 	// Create process
 	syscall.ForkLock.Lock()
@@ -215,7 +233,10 @@ func main() {
 	// 	windows.CREATE_NEW_PROCESS_GROUP|windows.CREATE_NEW_CONSOLE|windows.CREATE_SUSPENDED,
 	// 	nil, nil, &startupInfo, &processInfo)
 
-	err = CreateProcessAsUser(windows.Handle(lowToken), nil, argv, nil, nil, true,
+	// process info
+	var processInfo syscall.ProcessInformation
+
+	err = syscall.CreateProcessAsUser(syscall.Token(lowToken), nil, argv, nil, nil, true,
 		windows.CREATE_NEW_PROCESS_GROUP|windows.CREATE_NEW_CONSOLE|windows.CREATE_SUSPENDED,
 		nil, nil, &startupInfo, &processInfo)
 
@@ -233,7 +254,7 @@ func main() {
 	// Disable hard error?
 
 	// resume thread
-	ret2, err := windows.ResumeThread(processInfo.Thread)
+	ret2, err := windows.ResumeThread(windows.Handle(processInfo.Thread))
 	fmt.Println(ret2, err)
 
 	done := make(chan struct{})
@@ -278,15 +299,16 @@ func main() {
 	}
 
 	// wait process to terminate
-	event, err := windows.WaitForSingleObject(processInfo.Process, windows.INFINITE)
+	event, err := windows.WaitForSingleObject(windows.Handle(processInfo.Process), windows.INFINITE)
 	fmt.Println(event, err)
 
 	// get process exit code
 	var exitCode uint32
-	err = windows.GetExitCodeProcess(processInfo.Process, &exitCode)
+	err = windows.GetExitCodeProcess(windows.Handle(processInfo.Process), &exitCode)
 	fmt.Println(exitCode, err)
 
 	<-done
+	fmt.Scanln()
 }
 
 func grantAccess(h windows.Handle, groupSid *windows.SID) {
