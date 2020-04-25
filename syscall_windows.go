@@ -23,7 +23,6 @@ const (
 	WRITE_RESTRICTED
 )
 
-
 const (
 	DESKTOP_READOBJECTS windows.ACCESS_MASK = 1 << iota
 	DESKTOP_CREATEWINDOW
@@ -58,9 +57,17 @@ const (
 		DESKTOP_WRITEOBJECTS | READ_CONTROL | WRITE_DAC | WRITE_OWNER
 )
 
-
 type HDESK windows.Handle
 type HWINSTA windows.Handle
+
+// Mandatory Level Sids
+const (
+	SID_SYSTEM_MANDATORY_LEVEL    = "S-1-16-16384"
+	SID_HIGH_MANDATORY_LEVEL      = "S-1-16-12288"
+	SID_MEDIUM_MANDATORY_LEVEL    = "S-1-16-8192"
+	SID_LOW_MANDATORY_LEVEL       = "S-1-16-4096"
+	SID_UNTRUSTED_MANDATORY_LEVEL = "S-1-16-0"
+)
 
 //sys CreateRestrictedToken(existingToken windows.Token, flags uint32, disableSidCount uint32, sidsToDisable *windows.SIDAndAttributes, deletePrivilegeCount uint32, privilegesToDelete *windows.SIDAndAttributes, restrictedSidCount uint32, sidToRestrict *windows.SIDAndAttributes, newTokenHandle *windows.Token) (err error) = advapi32.CreateRestrictedToken
 //sys GetThreadDesktop(threadID uint32) (h HDESK) = user32.GetThreadDesktop

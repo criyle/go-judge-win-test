@@ -33,3 +33,27 @@ Test code that might used in [go-judge](https://github.com/criyle/go-judge)/exec
 - [iceb0y/windows-container](https://github.com/iceb0y/windows-container) / core
 - [kernelbin/BOIT](https://github.com/kernelbin/BOIT) / BOIT Server / Simple sandbox
 - [Chromium Sandbox](https://chromium.googlesource.com/chromium/src/+/master/docs/design/sandbox.md)
+
+## Windows Access Control Model
+
+- [Security Model](https://docs.microsoft.com/en-us/windows/win32/secauthz/access-control-components)
+
+### Access Token
+
+- [Access Token](https://docs.microsoft.com/en-us/windows/win32/secauthz/access-tokens)
+- Security Identifier (SID) for user / groups / logon session / owner / primary group
+- Privilleges
+- Default DACL
+- Source of the access token
+- Primary / impersonation token
+- Restricting SIDs
+- Current impersonation levels
+
+### Security Descriptor
+
+For a securable object. Contains
+
+- Discretionary Access Contol List (DACL)
+- System Access Control List (SACL)
+
+ACL contains list of Access Control Entries (ACE) with access rights and trustee.

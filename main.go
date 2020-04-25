@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"syscall"
 	"time"
@@ -12,127 +13,69 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func main() {
-	// Get group sid
-	curProc, err := windows.GetCurrentProcess()
-	fmt.Println("curProc", curProc, err)
-
+func createLowMandatoryLevelToken() (token windows.Token, err error) {
 	// Get current process token
-	var token windows.Token
-	err = windows.OpenProcessToken(curProc,
-		windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE|
-			windows.TOKEN_ADJUST_DEFAULT|windows.TOKEN_ASSIGN_PRIMARY, &token)
-	// err = windows.OpenProcessToken(curProc, windows.MAXIMUM_ALLOWED, &token)
-	fmt.Println(token, err)
-
-	// Get group Sid
-	var l uint32
-	var groupSid *windows.SID
-	if err := windows.GetTokenInformation(token, windows.TokenGroups, nil, 0, &l); err == windows.ERROR_INSUFFICIENT_BUFFER {
-		buf := make([]byte, l)
-		windows.GetTokenInformation(token, windows.TokenGroups, &buf[0], l, &l)
-		tg := (*windows.Tokengroups)(unsafe.Pointer(&buf[0]))
-		for _, info := range tg.AllGroups() {
-			if info.Attributes&windows.SE_GROUP_LOGON_ID == windows.SE_GROUP_LOGON_ID {
-				groupSid = info.Sid
-			}
-		}
+	var procToken windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(),
+		windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE|windows.TOKEN_ADJUST_DEFAULT|windows.TOKEN_ASSIGN_PRIMARY,
+		&procToken); err != nil {
+		return token, err
 	}
-	fmt.Println(groupSid)
-
-	builtInSid, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
-	worldSid, err := windows.CreateWellKnownSid(windows.WinWorldSid)
-
-	fmt.Println("sids", builtInSid, worldSid, err)
-
-	var attrs []windows.SIDAndAttributes
-	for _, s := range []*windows.SID{worldSid} {
-		attrs = append(attrs, windows.SIDAndAttributes{Sid: s})
-	}
-	_ = attrs
 
 	// create restricted token
-	var newToken windows.Token
-	err = CreateRestrictedToken(token, DISABLE_MAX_PRIVILEGE,
-		0, nil,
-		0, nil,
-		uint32(len(attrs)), &attrs[0],
-		&newToken)
-	fmt.Println("restricted token", newToken, err)
+	if err := CreateRestrictedToken(procToken, DISABLE_MAX_PRIVILEGE, 0, nil, 0, nil, 0, nil, &token); err != nil {
+		return token, err
+	}
+	defer func() {
+		if err != nil {
+			token.Close()
+		}
+	}()
 
-	// low privillege token
-	var lowToken windows.Token
-	err = windows.DuplicateTokenEx(token, windows.MAXIMUM_ALLOWED, nil,
-		windows.SecurityAnonymous,
-		windows.TokenPrimary, &lowToken)
-	fmt.Println("duplicated token", lowToken, err)
-
-	// https://support.microsoft.com/en-ca/help/243330/well-known-security-identifiers-in-windows-operating-systems
-	lowSidName := "S-1-16-4096" // Low Mandatory Level
-	lowSid, err := windows.StringToSid(lowSidName)
-	fmt.Println("low sid", lowSid, err)
-
+	lowSid, err := windows.StringToSid(SID_LOW_MANDATORY_LEVEL)
+	if err != nil {
+		return token, err
+	}
 	tml := windows.Tokenmandatorylabel{
 		Label: windows.SIDAndAttributes{
 			Sid:        lowSid,
 			Attributes: windows.SE_GROUP_INTEGRITY,
 		},
 	}
-	_ = tml
+	if err = windows.SetTokenInformation(token, syscall.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&tml)), uint32(unsafe.Sizeof(tml))); err != nil {
+		return token, err
+	}
+	return token, nil
+}
 
-	err = windows.SetTokenInformation(lowToken, syscall.TokenIntegrityLevel,
-		(*byte)(unsafe.Pointer(&tml)), uint32(unsafe.Sizeof(tml))+windows.GetLengthSid(lowSid))
-	fmt.Println("low token", lowToken, err)
+func main() {
+	// low integrity security descriptor
+	// https://docs.microsoft.com/en-us/windows/win32/secauthz/ace-strings
+	// ML: mandatory level, NW: no write up, LW: low mandatory level
+	// A: Allow; .. WD: everyone SID
+	sdString := "S:(ML;;NW;;;LW)D:(A;;0x12019f;;;WD)"
+	sd, err := windows.SecurityDescriptorFromString(sdString)
+	sa := windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: sd,
+	}
+	sacl, _, _ := sd.SACL()
 
-	err = windows.AdjustTokenPrivileges(lowToken, true, nil, 0, nil, nil)
-	fmt.Println(err)
+	workDir, err := ioutil.TempDir("", "")
+	windows.SetNamedSecurityInfo(workDir, windows.SE_FILE_OBJECT, windows.LABEL_SECURITY_INFORMATION, nil, nil, nil, sacl)
+	fmt.Println("workdir:", workDir, err)
 
-	fmt.Println(lowToken.Environ(true))
-	tg, err := lowToken.GetTokenGroups()
-	fmt.Println(tg.AllGroups())
-	fmt.Println(lowToken.GetTokenPrimaryGroup())
-	fmt.Println(lowToken.GetTokenUser())
-	fmt.Println(lowToken.GetUserProfileDirectory())
-	fmt.Println(lowToken.IsElevated())
-	fmt.Println(newToken.IsElevated())
-
-	// get current desktop
-	curDesk := GetThreadDesktop(windows.GetCurrentThreadId())
-	fmt.Println("curDesktop:", curDesk)
+	lowToken, err := createLowMandatoryLevelToken()
+	fmt.Println(lowToken, err)
 
 	// create desktop
 	random := make([]byte, 8)
 	rand.Read(random)
 	name := fmt.Sprintf("winc_%08x_%s", windows.GetCurrentProcessId(), hex.EncodeToString(random))
 	nameW := syscall.StringToUTF16Ptr(name)
-	deskAccess := DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW |
-		DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP |
-		READ_CONTROL | WRITE_DAC | WRITE_OWNER
-	_ = deskAccess
 
-	// newDesk, err := createDesktop(nameW, nil, 0, 0, deskAccess, nil)
-	// allow low integrity to medium / high integrity pipe
-	deskSd, err := windows.SecurityDescriptorFromString("S:(ML;;NW;;;LW)D:(A;;0x12019f;;;WD)")
-	fmt.Println("deskSa", deskSd, err)
-
-	deskSa := windows.SecurityAttributes{
-		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
-		SecurityDescriptor: deskSd,
-		InheritHandle:      0,
-	}
-
-	newDesk, err := CreateDesktop(nameW, nil, 0, 0, GENERIC_ALL, &deskSa)
+	newDesk, err := CreateDesktop(nameW, nil, 0, 0, GENERIC_ALL, &sa)
 	fmt.Println("new desktop", newDesk, err)
-
-	if false {
-		// grant access
-		grantAccess(windows.Handle(newDesk), groupSid)
-
-		// win station
-		winStation := GetProcessWindowStation()
-		fmt.Println("win station", winStation)
-		grantAccess(windows.Handle(winStation), groupSid)
-	}
 
 	// create job object
 	hJob, err := windows.CreateJobObject(nil, nil)
@@ -142,7 +85,7 @@ func main() {
 	var limit windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 
 	// time limit: 100 * nanosecond
-	limit.BasicLimitInformation.PerJobUserTimeLimit = int64(time.Second.Nanoseconds() / 100)
+	limit.BasicLimitInformation.PerJobUserTimeLimit = int64(time.Second.Nanoseconds()/100) * 100
 	limit.BasicLimitInformation.LimitFlags |= windows.JOB_OBJECT_LIMIT_JOB_TIME
 
 	// memory limit: byte
@@ -183,67 +126,58 @@ func main() {
 
 	// create output pipe
 	p := make([]windows.Handle, 2)
-	err = windows.Pipe(p)
+	err = windows.CreatePipe(&p[0], &p[1], &sa, 0)
 	fmt.Println(p, err)
-
-	err = windows.SetHandleInformation(p[1], windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT)
-	fmt.Println(err)
 
 	// create input pipe
 	p2 := make([]windows.Handle, 2)
-	err = windows.Pipe(p2)
+	err = windows.CreatePipe(&p2[0], &p2[1], &sa, 0)
 	fmt.Println(p2, err)
-
-	err = windows.SetHandleInformation(p2[0], windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT)
-	fmt.Println(err)
 
 	// create input mapping file
 	fin, err := createFileMapping([]byte("Test Content"), "input")
 	fmt.Println("file mapping", fin, err)
 
-	// create pipe mapping
-	var startupInfo syscall.StartupInfo
-	startupInfo.Flags |= windows.STARTF_USESTDHANDLES // STARTF_FORCEOFFFEEDBACK
-	var inHandle windows.Handle
-
-	err = windows.DuplicateHandle(windows.CurrentProcess(), windows.Handle(fin.Fd()), windows.CurrentProcess(), &inHandle, 0, true, syscall.DUPLICATE_SAME_ACCESS)
-	//startupInfo.StdInput = p2[0]
-	startupInfo.StdInput = syscall.Handle(inHandle)
-	startupInfo.StdOutput = syscall.Handle(p[1])
-	startupInfo.StdErr = syscall.Handle(p[1])
-
-	startupInfo.Desktop = nameW
-
-	// argv := syscall.StringToUTF16Ptr("C:\\go\\bin\\go.exe")
+	//argv := syscall.StringToUTF16Ptr("C:\\go\\bin\\go.exe")
 	//argv := syscall.StringToUTF16Ptr("c:\\windows\\system32\\calc.exe")
 	// argv := syscall.StringToUTF16Ptr("c:\\windows\\system32\\cmd.exe")
 	//argv := syscall.StringToUTF16Ptr("c:\\windows\\py.exe -c \"while True: pass\"")
 	//argv := syscall.StringToUTF16Ptr("c:\\windows\\system32\\tasklist.exe")
 	//argv := syscall.StringToUTF16Ptr("C:\\Program Files\\Git\\usr\\bin\\cat.exe go.mod")
-	argv := syscall.StringToUTF16Ptr("C:\\Program Files\\Git\\usr\\bin\\cat.exe")
+	argv := syscall.StringToUTF16Ptr("C:\\Program Files\\Git\\usr\\bin\\touch.exe 1")
+	workDirW := syscall.StringToUTF16Ptr(workDir)
+
+	// create pipe mapping
+	var startupInfo syscall.StartupInfo
+	startupInfo.Flags |= windows.STARTF_USESTDHANDLES // STARTF_FORCEOFFFEEDBACK
+	startupInfo.Desktop = nameW
 
 	// Create process
-	syscall.ForkLock.Lock()
-
-	// err = windows.CreateProcess(nil, argv, nil, nil, true,
-	// 	windows.CREATE_NEW_PROCESS_GROUP|windows.CREATE_NEW_CONSOLE|windows.CREATE_SUSPENDED,
-	// 	nil, nil, &startupInfo, &processInfo)
-
-	// err = CreateProcessAsUser(windows.Handle(newToken), nil, argv, nil, nil, true,
-	// 	windows.CREATE_NEW_PROCESS_GROUP|windows.CREATE_NEW_CONSOLE|windows.CREATE_SUSPENDED,
-	// 	nil, nil, &startupInfo, &processInfo)
-
 	// process info
 	var processInfo syscall.ProcessInformation
+	func() {
+		syscall.ForkLock.Lock()
+		defer syscall.ForkLock.Unlock()
 
-	err = syscall.CreateProcessAsUser(syscall.Token(lowToken), nil, argv, nil, nil, true,
-		windows.CREATE_NEW_PROCESS_GROUP|windows.CREATE_NEW_CONSOLE|windows.CREATE_SUSPENDED,
-		nil, nil, &startupInfo, &processInfo)
+		var inHandle, outHandle windows.Handle
 
-	syscall.ForkLock.Unlock()
+		err = windows.DuplicateHandle(windows.CurrentProcess(), windows.Handle(fin.Fd()), windows.CurrentProcess(), &inHandle, 0, true, syscall.DUPLICATE_SAME_ACCESS)
+		defer windows.CloseHandle(inHandle)
+
+		err = windows.DuplicateHandle(windows.CurrentProcess(), p[1], windows.CurrentProcess(), &outHandle, 0, true, syscall.DUPLICATE_SAME_ACCESS)
+		defer windows.CloseHandle(outHandle)
+
+		startupInfo.StdInput = syscall.Handle(inHandle)
+		startupInfo.StdOutput = syscall.Handle(outHandle)
+		startupInfo.StdErr = syscall.Handle(outHandle)
+
+		err = syscall.CreateProcessAsUser(syscall.Token(lowToken), nil, argv, nil, nil, true,
+			windows.CREATE_NEW_PROCESS_GROUP|windows.CREATE_NEW_CONSOLE|windows.CREATE_SUSPENDED,
+			nil, workDirW, &startupInfo, &processInfo)
+	}()
 	fmt.Println("create process as user", err, processInfo)
 
-	// Close used pipes
+	// Close child pipes
 	windows.CloseHandle(p[1])
 	windows.CloseHandle(p2[0])
 
@@ -311,48 +245,38 @@ func main() {
 	fmt.Scanln()
 }
 
-func grantAccess(h windows.Handle, groupSid *windows.SID) {
-	sd, err := windows.GetSecurityInfo(h, windows.SE_WINDOW_OBJECT,
-		windows.DACL_SECURITY_INFORMATION)
-	fmt.Println(sd, err)
+// func grantAccess(h windows.Handle, groupSid *windows.SID) {
+// 	sd, err := windows.GetSecurityInfo(h, windows.SE_WINDOW_OBJECT,
+// 		windows.DACL_SECURITY_INFORMATION)
+// 	fmt.Println(sd, err)
 
-	// explicit access
-	expAccess := windows.EXPLICIT_ACCESS{
-		AccessPermissions: GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE,
-		AccessMode:        windows.GRANT_ACCESS,
-		Trustee: windows.TRUSTEE{
-			MultipleTrusteeOperation: windows.NO_MULTIPLE_TRUSTEE,
-			TrusteeForm:              windows.TRUSTEE_IS_SID,
-			TrusteeType:              windows.TRUSTEE_IS_GROUP,
-			TrusteeValue:             windows.TrusteeValueFromSID(groupSid),
-		},
-	}
-	oldACL, _, err := sd.DACL()
-	newACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{expAccess}, oldACL)
-	fmt.Println("new ACL", oldACL, newACL, err)
+// 	// explicit access
+// 	expAccess := windows.EXPLICIT_ACCESS{
+// 		AccessPermissions: GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE,
+// 		AccessMode:        windows.GRANT_ACCESS,
+// 		Trustee: windows.TRUSTEE{
+// 			MultipleTrusteeOperation: windows.NO_MULTIPLE_TRUSTEE,
+// 			TrusteeForm:              windows.TRUSTEE_IS_SID,
+// 			TrusteeType:              windows.TRUSTEE_IS_GROUP,
+// 			TrusteeValue:             windows.TrusteeValueFromSID(groupSid),
+// 		},
+// 	}
+// 	oldACL, _, err := sd.DACL()
+// 	newACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{expAccess}, oldACL)
+// 	fmt.Println("new ACL", oldACL, newACL, err)
 
-	// set security info
-	windows.SetSecurityInfo(h, windows.SE_WINDOW_OBJECT,
-		windows.DACL_SECURITY_INFORMATION, nil, nil, newACL, nil)
+// 	// set security info
+// 	windows.SetSecurityInfo(h, windows.SE_WINDOW_OBJECT,
+// 		windows.DACL_SECURITY_INFORMATION, nil, nil, newACL, nil)
 
-	// Get sid
-	var nSid *windows.SID
-	err = windows.AllocateAndInitializeSid(
-		&windows.SECURITY_MANDATORY_LABEL_AUTHORITY,
-		1, SECURITY_MANDATORY_LOW_RID, 0, 0, 0, 0, 0, 0, 0, &nSid,
-	)
-	fmt.Println(nSid, err)
+// 	// Get sid
+// 	var nSid *windows.SID
+// 	err = windows.AllocateAndInitializeSid(
+// 		&windows.SECURITY_MANDATORY_LABEL_AUTHORITY,
+// 		1, SECURITY_MANDATORY_LOW_RID, 0, 0, 0, 0, 0, 0, 0, &nSid,
+// 	)
+// 	fmt.Println(nSid, err)
 
-	// SYSTEM_MANDATORY_LABEL_ACE
-	/////////////////////////////// leave for now logon.cc: 119 - 147
-}
-
-func randomGen() {
-	var cryptProv windows.Handle
-	const MS_DEF_PROV = "Microsoft Base Cryptographic Provider v1.0"
-	MS_DEF_PROV_W := syscall.StringToUTF16Ptr(MS_DEF_PROV)
-	const PROV_RSA_FULL = 1
-	const CRYPT_VERIFYCONTEXT = 0xF0000000
-	err := windows.CryptAcquireContext(&cryptProv, nil, MS_DEF_PROV_W, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)
-	fmt.Println("crypt", cryptProv, err)
-}
+// 	// SYSTEM_MANDATORY_LABEL_ACE
+// 	/////////////////////////////// leave for now logon.cc: 119 - 147
+// }
